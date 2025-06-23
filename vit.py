@@ -7,7 +7,6 @@ import torch.nn.functional as F
 def compute_mask(H, W, window_size, shift_size, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # 1 x H x W x 1
     img_mask = torch.zeros((1, H, W, 1), device=device)
     cnt = 0
     for h in (slice(0, -window_size),
@@ -22,7 +21,7 @@ def compute_mask(H, W, window_size, shift_size, device=None):
     mask_windows = window_partition(img_mask, window_size)  # nW, ws, ws, 1
     mask_windows = mask_windows.view(-1, window_size * window_size)
     attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)) \
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float('-inf')) \
         .masked_fill(attn_mask == 0, float(0.0))
     return attn_mask
 
@@ -33,14 +32,11 @@ def window_partition(x, window_size):
                H // window_size, window_size,
                W // window_size, window_size,
                C)
-    # (B, num_h_windows, num_w_windows, ws, ws, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-    # (num_windows*B, ws, ws, C)
     return windows.view(-1, window_size, window_size, C)
 
 
 def window_reverse(windows, window_size, H, W):
-    # windows: (num_windows*B, ws, ws, C)
     B = int(windows.shape[0] / ((H // window_size) * (W // window_size)))
     x = windows.view(B,
                      H // window_size,
@@ -53,8 +49,6 @@ def window_reverse(windows, window_size, H, W):
 
 
 class DropPath(nn.Module):
-    """Stochastic Depth per sample."""
-
     def __init__(self, drop_prob=0.0):
         super().__init__()
         self.drop_prob = drop_prob
@@ -84,7 +78,6 @@ class WindowAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(dropout)
 
-        # relative position bias table
         coords = torch.stack(torch.meshgrid(
             torch.arange(window_size),
             torch.arange(window_size),
@@ -155,32 +148,27 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm1(x).view(B, H, W, C)
 
-        # cyclic shift
         if self.shift_size > 0:
             x = torch.roll(x,
                            shifts=(-self.shift_size, -self.shift_size),
                            dims=(1, 2))
 
-        # partition
         x_windows = window_partition(x, self.window_size)
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
         attn_windows = self.attn(x_windows, mask)
 
-        # merge windows
         attn_windows = attn_windows.view(-1,
                                          self.window_size,
                                          self.window_size,
                                          C)
         x = window_reverse(attn_windows, self.window_size, H, W)
 
-        # reverse shift
         if self.shift_size > 0:
             x = torch.roll(x,
                            shifts=(self.shift_size, self.shift_size),
                            dims=(1, 2))
         x = x.view(B, H * W, C)
 
-        # residual blocks
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -221,7 +209,6 @@ class BasicLayer(nn.Module):
         self.window_size = window_size
         self.shift_size = window_size // 2
 
-        # build attention mask buffer (on default device)
         Hp, Wp = input_resolution
         max_H = math.ceil(Hp / window_size) * window_size
         max_W = math.ceil(Wp / window_size) * window_size
@@ -229,7 +216,6 @@ class BasicLayer(nn.Module):
                             window_size, self.shift_size)
         self.register_buffer('attn_mask', mask)
 
-        # stochastic depth schedule
         dpr = list(torch.linspace(0, drop_path, depth).numpy())
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(
@@ -245,7 +231,6 @@ class BasicLayer(nn.Module):
     def forward(self, x):
         B, L, C = x.shape
         H, W = self.input_resolution
-        # reshape & pad
         x = x.view(B, H, W, C).permute(0, 3, 1, 2)
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
@@ -253,11 +238,9 @@ class BasicLayer(nn.Module):
         _, C, Hp, Wp = x.shape
         x = x.permute(0, 2, 3, 1).view(B, -1, C)
 
-        # apply each Swin block
         for blk in self.blocks:
             x = blk(x, self.attn_mask.to(x.device))
 
-        # remove padding & merge
         x = x.view(B, Hp, Wp, C)[:, :H, :W, :].view(B, H * W, C)
         if self.downsample:
             x = self.downsample(x)
@@ -284,7 +267,6 @@ class SwinTransformer(nn.Module):
                                    img_size // patch_size)
         self.pos_drop = nn.Dropout(drop_rate)
 
-        # build layers
         self.layers = nn.ModuleList()
         for i, depth in enumerate(depths):
             res = (self.patches_resolution[0] // (2 ** i),
@@ -320,7 +302,6 @@ class SwinTransformer(nn.Module):
 
     def forward(self, x):
         x = self.patch_embed(x)
-        B, C, H, W = x.shape
         x = x.flatten(2).transpose(1, 2)
         x = self.patch_norm(x)
         x = self.pos_drop(x)
